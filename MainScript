@@ -1,0 +1,107 @@
+import os
+import requests
+import subprocess
+import json
+
+# Configuration - user must fill these in
+organization = "your_organization"  # e.g., "myorg"
+project = "your_project"            # e.g., "myproject"
+pat = "your_personal_access_token"  # Personal Access Token
+
+# Base64 encode the PAT for authentication
+from base64 import b64encode
+headers = {
+    "Authorization": "Basic " + b64encode(f":{pat}".encode()).decode(),
+    "Content-Type": "application/json"
+}
+
+base_url = f"https://dev.azure.com/{organization}/{project}/_apis"
+
+# Create backup directory
+backup_dir = f"azure_devops_backup/{project}"
+os.makedirs(backup_dir, exist_ok=True)
+
+# 1. Clone all Git repositories (mirror)
+def backup_git_repos():
+    print("Backing up Git repositories...")
+    repos_url = f"{base_url}/git/repositories?api-version=7.0"
+    response = requests.get(repos_url, headers=headers)
+    repos = response.json().get("value", [])
+    git_dir = os.path.join(backup_dir, "git_repos")
+    os.makedirs(git_dir, exist_ok=True)
+
+    for repo in repos:
+        clone_url = repo["remoteUrl"]
+        name = repo["name"]
+        print(f"Cloning {name}...")
+        subprocess.run(["git", "clone", "--mirror", clone_url, os.path.join(git_dir, f"{name}.git")])
+
+# 2. Export work items to JSON
+def backup_work_items():
+    print("Backing up work items...")
+    wiql_url = f"{base_url}/wit/wiql?api-version=7.0"
+    query = {
+        "query": "SELECT [System.Id] FROM WorkItems"
+    }
+    response = requests.post(wiql_url, headers=headers, json=query)
+    work_item_ids = [item["id"] for item in response.json().get("workItems", [])]
+
+    if not work_item_ids:
+        print("No work items found.")
+        return
+
+    ids_str = ",".join(map(str, work_item_ids))
+    items_url = f"{base_url}/wit/workitems?ids={ids_str}&$expand=all&api-version=7.0"
+    response = requests.get(items_url, headers=headers)
+    work_items = response.json().get("value", [])
+
+    with open(os.path.join(backup_dir, "work_items.json"), "w", encoding="utf-8") as f:
+        json.dump(work_items, f, indent=2)
+
+# 3. Export YAML pipelines
+def backup_yaml_pipelines():
+    print("Backing up YAML pipelines...")
+    pipelines_url = f"{base_url}/pipelines?api-version=7.0"
+    response = requests.get(pipelines_url, headers=headers)
+    pipelines = response.json().get("value", [])
+    yaml_dir = os.path.join(backup_dir, "yaml_pipelines")
+    os.makedirs(yaml_dir, exist_ok=True)
+
+    for pipeline in pipelines:
+        pipeline_id = pipeline["id"]
+        name = pipeline["name"]
+        run_url = f"{base_url}/pipelines/{pipeline_id}/runs?api-version=7.0"
+        run_response = requests.get(run_url, headers=headers)
+        runs = run_response.json().get("value", [])
+        if runs:
+            latest_run = runs[0]
+            resources = latest_run.get("resources", {})
+            repo_info = resources.get("repositories", {}).get("self", {})
+            yaml_path = repo_info.get("refName", "unknown")
+            with open(os.path.join(yaml_dir, f"{name}_info.json"), "w", encoding="utf-8") as f:
+                json.dump(latest_run, f, indent=2)
+
+# 4. Backup Git-based Wikis
+def backup_wikis():
+    print("Backing up wikis...")
+    wikis_url = f"https://dev.azure.com/{organization}/_apis/wiki/wikis?api-version=7.0"
+    response = requests.get(wikis_url, headers=headers)
+    wikis = response.json().get("value", [])
+    wiki_dir = os.path.join(backup_dir, "wikis")
+    os.makedirs(wiki_dir, exist_ok=True)
+
+    for wiki in wikis:
+        if wiki["type"] == "code":
+            name = wiki["name"]
+            repo_url = wiki["remoteUrl"]
+            print(f"Cloning wiki {name}...")
+            subprocess.run(["git", "clone", "--mirror", repo_url, os.path.join(wiki_dir, f"{name}.git")])
+
+# Run all backup functions
+backup_git_repos()
+backup_work_items()
+backup_yaml_pipelines()
+backup_wikis()
+
+print("Backup completed.")
+
