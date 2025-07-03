@@ -1,0 +1,85 @@
+import tkinter as tk
+from tkinter import messagebox, filedialog
+import requests
+import subprocess
+import os
+import json
+from requests.auth import HTTPBasicAuth
+
+def backup_git_repos(org, project, pat, output_dir):
+    url = f"https://dev.azure.com/{org}/{project}/_apis/git/repositories?api-version=7.0"
+    response = requests.get(url, auth=HTTPBasicAuth('', pat))
+    repos = response.json().get('value', [])
+    for repo in repos:
+        clone_url = repo['remoteUrl']
+        name = repo['name']
+        repo_dir = os.path.join(output_dir, f"{name}.git")
+        subprocess.run(["git", "clone", "--mirror", clone_url, repo_dir])
+
+def backup_work_items(org, project, pat, output_dir):
+    url = f"https://dev.azure.com/{org}/{project}/_apis/wit/workitems?ids=1&$expand=all&api-version=7.0"
+    query_url = f"https://dev.azure.com/{org}/{project}/_apis/wit/wiql?api-version=7.0"
+    query = {"query": "Select [System.Id] From WorkItems"}
+    response = requests.post(query_url, json=query, auth=HTTPBasicAuth('', pat))
+    ids = [str(item['id']) for item in response.json().get('workItems', [])]
+    if ids:
+        ids_str = ",".join(ids)
+        work_items_url = f"https://dev.azure.com/{org}/{project}/_apis/wit/workitems?ids={ids_str}&$expand=all&api-version=7.0"
+        work_items_response = requests.get(work_items_url, auth=HTTPBasicAuth('', pat))
+        with open(os.path.join(output_dir, "work_items_backup.json"), "w", encoding="utf-8") as f:
+            json.dump(work_items_response.json(), f, indent=2)
+
+def backup_yaml_pipelines(org, project, pat, output_dir):
+    pipelines_url = f"https://dev.azure.com/{org}/{project}/_apis/pipelines?api-version=7.0"
+    response = requests.get(pipelines_url, auth=HTTPBasicAuth('', pat))
+    pipelines = response.json().get('value', [])
+    pipelines_data = []
+
+    for pipeline in pipelines:
+        pipeline_id = pipeline['id']
+        run_url = f"https://dev.azure.com/{org}/{project}/_apis/pipelines/{pipeline_id}?api-version=7.0"
+        run_response = requests.get(run_url, auth=HTTPBasicAuth('', pat))
+        if run_response.status_code == 200:
+            pipelines_data.append(run_response.json())
+
+    with open(os.path.join(output_dir, "yaml_pipelines_backup.json"), "w", encoding="utf-8") as f:
+        json.dump(pipelines_data, f, indent=2)
+
+def perform_backup():
+    org = org_entry.get()
+    project = project_entry.get()
+    pat = pat_entry.get()
+    output_dir = filedialog.askdirectory(title="Wybierz folder do zapisu backupu")
+
+    if not all([org, project, pat, output_dir]):
+        messagebox.showerror("Błąd", "Wszystkie pola muszą być wypełnione.")
+        return
+
+    try:
+        backup_git_repos(org, project, pat, output_dir)
+        backup_work_items(org, project, pat, output_dir)
+        backup_yaml_pipelines(org, project, pat, output_dir)
+        messagebox.showinfo("Sukces", "Backup zakończony pomyślnie.")
+    except Exception as e:
+        messagebox.showerror("Błąd", f"Wystąpił błąd: {e}")
+
+# GUI
+root = tk.Tk()
+root.title("Azure DevOps Backup Tool")
+
+tk.Label(root, text="Nazwa organizacji:").grid(row=0, column=0, sticky="e")
+tk.Label(root, text="Nazwa projektu:").grid(row=1, column=0, sticky="e")
+tk.Label(root, text="Personal Access Token (PAT):").grid(row=2, column=0, sticky="e")
+
+org_entry = tk.Entry(root, width=40)
+project_entry = tk.Entry(root, width=40)
+pat_entry = tk.Entry(root, width=40, show="*")
+
+org_entry.grid(row=0, column=1, padx=5, pady=5)
+project_entry.grid(row=1, column=1, padx=5, pady=5)
+pat_entry.grid(row=2, column=1, padx=5, pady=5)
+
+tk.Button(root, text="Wykonaj backup", command=perform_backup).grid(row=3, column=0, columnspan=2, pady=10)
+
+root.mainloop()
+
